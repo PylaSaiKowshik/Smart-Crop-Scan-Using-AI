@@ -11,7 +11,7 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ✅ model is in src/models/
 model = tf.keras.models.load_model(
-    # os.path.join(ROOT_DIR, "src", "models", "crop_disease_mobilenetv2_FIXED_FINAL.keras")
+    
     os.path.join(ROOT_DIR, "src", "models", "best_crop_disease_model.keras")
 )
 

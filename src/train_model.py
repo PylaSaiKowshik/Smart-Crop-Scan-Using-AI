@@ -1,58 +1,443 @@
-# current mobilenetv2 with 96 accuracy 
-from matplotlib import pyplot as plt
+# current mobilenetv2 model with 97% accuracy 
 import tensorflow as tf
-from tensorflow.keras import layers, models
+from tensorflow.keras import layers
+from matplotlib import pyplot as plt
+import os
 
+# -----------------------------
+# CONFIG
+# -----------------------------
 IMG_SIZE = 224
-DATASET_DIR = r"C:\projects\cropdiseasedetection\dataset"
+BATCH_SIZE = 32
+EPOCHS_HEAD = 10
+EPOCHS_FINETUNE = 20
 
+DATASET_DIR = r"C:\projects\Crop Disease Detection-clg\datasets\train_dataset"
+SAVE_PATH = r"C:\projects\Crop Disease Detection-clg\src\models\best_crop_disease_model.keras"
+
+# -----------------------------
+# LOAD DATASET
+# -----------------------------
 train_ds = tf.keras.preprocessing.image_dataset_from_directory(
-    DATASET_DIR, validation_split=0.2, subset="training",
-    seed=42, image_size=(IMG_SIZE, IMG_SIZE), batch_size=32)
+    DATASET_DIR,
+    validation_split=0.2,
+    subset="training",
+    seed=42,
+    image_size=(IMG_SIZE, IMG_SIZE),
+    batch_size=BATCH_SIZE
+)
 
 val_ds = tf.keras.preprocessing.image_dataset_from_directory(
-    DATASET_DIR, validation_split=0.2, subset="validation",
-    seed=42, image_size=(IMG_SIZE, IMG_SIZE), batch_size=32)
+    DATASET_DIR,
+    validation_split=0.2,
+    subset="validation",
+    seed=42,
+    image_size=(IMG_SIZE, IMG_SIZE),
+    batch_size=BATCH_SIZE
+)
 
 class_names = train_ds.class_names
-print("Classes:", class_names)
+print(f"\nClasses ({len(class_names)}):", class_names)
 
-# ------------------------------
+# -----------------------------
+# DATA AUGMENTATION
+# -----------------------------
+augment = tf.keras.Sequential([
+    layers.RandomFlip("horizontal"),
+    layers.RandomRotation(0.2),
+    layers.RandomZoom(0.2),
+    layers.RandomContrast(0.2),
+    layers.RandomBrightness(0.15)
+], name="augmentation")
 
-# FIXED: BUILD FUNCTIONAL MODEL
-# ------------------------------
-inputs = tf.keras.Input(shape=(224, 224, 3), name="image_input")
+AUTOTUNE = tf.data.AUTOTUNE
 
-# preprocessing should NOT include separate InputLayers
+train_ds = train_ds.map(lambda x, y: (augment(x, training=True), y)).prefetch(AUTOTUNE)
+val_ds = val_ds.prefetch(AUTOTUNE)
+
+# -----------------------------
+# BUILD MODEL (MobileNetV2)
+# -----------------------------
+inputs = tf.keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+
 x = tf.keras.applications.mobilenet_v2.preprocess_input(inputs)
 
-base = tf.keras.applications.MobileNetV2(
-    include_top=False, weights="imagenet", input_tensor=x)
+base_model = tf.keras.applications.MobileNetV2(
+    include_top=False,
+    weights="imagenet",
+    input_tensor=x
+)
 
-x = layers.GlobalAveragePooling2D()(base.output)
-x = layers.Dropout(0.3)(x)
+base_model.trainable = False
+
+# -----------------------------
+# CLASSIFIER HEAD
+# -----------------------------
+x = layers.GlobalAveragePooling2D()(base_model.output)
+x = layers.BatchNormalization()(x)
+
+x = layers.Dense(256, activation="relu")(x)
+x = layers.Dropout(0.4)(x)
+
 outputs = layers.Dense(len(class_names), activation="softmax")(x)
 
 model = tf.keras.Model(inputs, outputs)
-model.compile(optimizer="adam",
-              loss="sparse_categorical_crossentropy",
-              metrics=["accuracy"])
+
+# -----------------------------
+# COMPILE PHASE 1
+# -----------------------------
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+    loss="sparse_categorical_crossentropy",
+    metrics=["accuracy"]
+)
 
 model.summary()
 
-model.fit(train_ds, validation_data=val_ds, epochs=20)
+# -----------------------------
+# CALLBACKS
+# -----------------------------
+early_stop = tf.keras.callbacks.EarlyStopping(
+    monitor="val_accuracy",
+    patience=4,
+    restore_best_weights=True,
+    verbose=1
+)
 
-# this model WILL work with Grad-CAM
-model.save("crop_disease_mobilenetv2_FIXED_FINAL.keras")
-print("✔ Saved fixed model")
-plt.figure()
-plt.plot(history.history['accuracy'])
-plt.plot(history.history['val_accuracy'])
-plt.title("Model Accuracy")
-plt.ylabel("Accuracy")
-plt.xlabel("Epoch")
-plt.legend(['Train', 'Validation'])
+reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
+    monitor="val_loss",
+    factor=0.3,
+    patience=2,
+    min_lr=1e-7,
+    verbose=1
+)
+
+checkpoint = tf.keras.callbacks.ModelCheckpoint(
+    SAVE_PATH,
+    monitor="val_accuracy",
+    save_best_only=True,
+    verbose=1
+)
+
+# =============================
+# PHASE 1 — Train Head
+# =============================
+print("\nPhase 1 — Training classifier head")
+
+history1 = model.fit(
+    train_ds,
+    validation_data=val_ds,
+    epochs=EPOCHS_HEAD,
+    callbacks=[early_stop, reduce_lr, checkpoint]
+)
+
+# =============================
+# PHASE 2 — Fine Tuning
+# =============================
+print("\nPhase 2 — Fine tuning MobileNetV2")
+
+# Unfreeze backbone
+for layer in model.layers[:120]:
+    layer.trainable = False
+
+for layer in model.layers[120:]:
+    layer.trainable = True
+
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
+    loss="sparse_categorical_crossentropy",
+    metrics=["accuracy"]
+)
+
+early_stop2 = tf.keras.callbacks.EarlyStopping(
+    monitor="val_accuracy",
+    patience=6,
+    restore_best_weights=True,
+    verbose=1
+)
+
+reduce_lr2 = tf.keras.callbacks.ReduceLROnPlateau(
+    monitor="val_loss",
+    factor=0.3,
+    patience=3,
+    min_lr=1e-7,
+    verbose=1
+)
+
+history2 = model.fit(
+    train_ds,
+    validation_data=val_ds,
+    epochs=EPOCHS_FINETUNE,
+    callbacks=[early_stop2, reduce_lr2, checkpoint]
+)
+
+print(f"\nBest model saved at: {SAVE_PATH}")
+
+# -----------------------------
+# PLOT TRAINING CURVES
+# -----------------------------
+acc1 = history1.history["accuracy"]
+vacc1 = history1.history["val_accuracy"]
+
+acc2 = history2.history["accuracy"]
+vacc2 = history2.history["val_accuracy"]
+
+all_acc = acc1 + acc2
+all_vacc = vacc1 + vacc2
+
+plt.figure(figsize=(10,4))
+
+plt.subplot(1,2,1)
+plt.plot(all_acc,label="Train")
+plt.plot(all_vacc,label="Validation")
+plt.axvline(x=len(acc1)-1,color="gray",linestyle="--")
+plt.title("Accuracy")
+plt.legend()
+
+plt.subplot(1,2,2)
+loss1 = history1.history["loss"]
+vloss1 = history1.history["val_loss"]
+
+loss2 = history2.history["loss"]
+vloss2 = history2.history["val_loss"]
+
+plt.plot(loss1+loss2,label="Train")
+plt.plot(vloss1+vloss2,label="Validation")
+plt.axvline(x=len(loss1)-1,color="gray",linestyle="--")
+plt.title("Loss")
+plt.legend()
+
+plt.tight_layout()
 plt.show()
+
+
+
+
+
+
+# import tensorflow as tf
+# from tensorflow.keras import layers
+# from matplotlib import pyplot as plt
+# import os
+
+# IMG_SIZE = 224
+# BATCH_SIZE = 32
+# EPOCHS_HEAD = 10       # Phase 1 — train head only
+# EPOCHS_FINETUNE = 20   # Phase 2 — unfreeze + fine-tune
+
+# DATASET_DIR = r"C:\projects\Crop Disease Detection-clg\datasets\train_dataset"
+# SAVE_PATH    = r"C:\projects\Crop Disease Detection-clg\src\models\best_crop_disease_model.keras"
+
+# # ── Dataset ──
+# train_ds = tf.keras.preprocessing.image_dataset_from_directory(
+#     DATASET_DIR, validation_split=0.2, subset="training",
+#     seed=42, image_size=(IMG_SIZE, IMG_SIZE), batch_size=BATCH_SIZE)
+
+# val_ds = tf.keras.preprocessing.image_dataset_from_directory(
+#     DATASET_DIR, validation_split=0.2, subset="validation",
+#     seed=42, image_size=(IMG_SIZE, IMG_SIZE), batch_size=BATCH_SIZE)
+
+# class_names = train_ds.class_names
+# print(f"✔ Classes ({len(class_names)}):", class_names)
+
+# # ── Augmentation ──
+# augment = tf.keras.Sequential([
+#     layers.RandomFlip("horizontal"),
+#     layers.RandomRotation(0.15),
+#     layers.RandomZoom(0.15),
+#     layers.RandomBrightness(0.1),
+#     layers.RandomContrast(0.1),
+# ], name="augmentation")
+
+# # ── Prefetch for speed ──
+# AUTOTUNE = tf.data.AUTOTUNE
+# train_ds = train_ds.map(lambda x, y: (augment(x, training=True), y)).prefetch(AUTOTUNE)
+# val_ds   = val_ds.prefetch(AUTOTUNE)
+
+# # ── Build Model ──
+# inputs = tf.keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3), name="image_input")
+# x = tf.keras.applications.mobilenet_v2.preprocess_input(inputs)
+
+# base = tf.keras.applications.MobileNetV2(
+#     include_top=False, weights="imagenet", input_tensor=x)
+
+# # Phase 1 — freeze entire base
+# base.trainable = False
+
+# x = layers.GlobalAveragePooling2D()(base.output)
+# x = layers.BatchNormalization()(x)
+# x = layers.Dropout(0.3)(x)
+# outputs = layers.Dense(len(class_names), activation="softmax")(x)
+
+# model = tf.keras.Model(inputs, outputs)
+
+# model.compile(
+#     optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+#     loss="sparse_categorical_crossentropy",
+#     metrics=["accuracy"]
+# )
+
+# model.summary()
+
+# # ── Callbacks ──
+# early_stop = tf.keras.callbacks.EarlyStopping(
+#     monitor="val_accuracy", patience=4, restore_best_weights=True, verbose=1)
+
+# reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
+#     monitor="val_loss", factor=0.3, patience=2, min_lr=1e-7, verbose=1)
+
+# checkpoint = tf.keras.callbacks.ModelCheckpoint(
+#     SAVE_PATH, monitor="val_accuracy", save_best_only=True, verbose=1)
+
+# # ════════════════════════════════
+# # PHASE 1 — Train head only
+# # ════════════════════════════════
+# print("\n── Phase 1: Training classification head ──")
+# history1 = model.fit(
+#     train_ds, validation_data=val_ds,
+#     epochs=EPOCHS_HEAD,
+#     callbacks=[early_stop, reduce_lr, checkpoint]
+# )
+
+# # ════════════════════════════════
+# # PHASE 2 — Unfreeze top layers & fine-tune
+# # ════════════════════════════════
+# print("\n── Phase 2: Fine-tuning top layers ──")
+
+# # Unfreeze last 30 layers of base model
+# base.trainable = True
+# for layer in base.layers[:-30]:
+#     layer.trainable = False
+
+# # Recompile with lower LR for fine-tuning
+# model.compile(
+#     optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
+#     loss="sparse_categorical_crossentropy",
+#     metrics=["accuracy"]
+# )
+
+# early_stop2 = tf.keras.callbacks.EarlyStopping(
+#     monitor="val_accuracy", patience=5, restore_best_weights=True, verbose=1)
+
+# reduce_lr2 = tf.keras.callbacks.ReduceLROnPlateau(
+#     monitor="val_loss", factor=0.3, patience=2, min_lr=1e-7, verbose=1)
+
+# history2 = model.fit(
+#     train_ds, validation_data=val_ds,
+#     epochs=EPOCHS_FINETUNE,
+#     callbacks=[early_stop2, reduce_lr2, checkpoint]
+# )
+
+# print(f"\n✔ Best model saved to: {SAVE_PATH}")
+
+# # ── Plot Accuracy ──
+# acc1  = history1.history['accuracy']
+# vacc1 = history1.history['val_accuracy']
+# acc2  = history2.history['accuracy']
+# vacc2 = history2.history['val_accuracy']
+
+# all_acc  = acc1  + acc2
+# all_vacc = vacc1 + vacc2
+
+# plt.figure(figsize=(10, 4))
+
+# plt.subplot(1, 2, 1)
+# plt.plot(all_acc,  label='Train')
+# plt.plot(all_vacc, label='Validation')
+# plt.axvline(x=len(acc1)-1, color='gray', linestyle='--', label='Fine-tune start')
+# plt.title("Accuracy")
+# plt.xlabel("Epoch")
+# plt.ylabel("Accuracy")
+# plt.legend()
+
+# plt.subplot(1, 2, 2)
+# loss1  = history1.history['loss']
+# vloss1 = history1.history['val_loss']
+# loss2  = history2.history['loss']
+# vloss2 = history2.history['val_loss']
+# plt.plot(loss1  + loss2,  label='Train')
+# plt.plot(vloss1 + vloss2, label='Validation')
+# plt.axvline(x=len(loss1)-1, color='gray', linestyle='--', label='Fine-tune start')
+# plt.title("Loss")
+# plt.xlabel("Epoch")
+# plt.ylabel("Loss")
+# plt.legend()
+
+# plt.tight_layout()
+# plt.savefig(r"C:\projects\Crop Disease Detection-clg\src\models\training_plot.png", dpi=150)
+# plt.show()
+# print("✔ Training plot saved")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# current mobilenetv2 with 96 accuracy but got only 92
+# from matplotlib import pyplot as plt
+# import tensorflow as tf
+# from tensorflow.keras import layers, models
+
+# IMG_SIZE = 224
+# DATASET_DIR = r"C:\projects\Crop Disease Detection-clg\datasets\train_dataset"
+
+# train_ds = tf.keras.preprocessing.image_dataset_from_directory(
+#     DATASET_DIR, validation_split=0.2, subset="training",
+#     seed=42, image_size=(IMG_SIZE, IMG_SIZE), batch_size=32)
+
+# val_ds = tf.keras.preprocessing.image_dataset_from_directory(
+#     DATASET_DIR, validation_split=0.2, subset="validation",
+#     seed=42, image_size=(IMG_SIZE, IMG_SIZE), batch_size=32)
+
+# class_names = train_ds.class_names
+# print("Classes:", class_names)
+
+# # ------------------------------
+
+# # FIXED: BUILD FUNCTIONAL MODEL
+# # ------------------------------
+# inputs = tf.keras.Input(shape=(224, 224, 3), name="image_input")
+
+# # preprocessing should NOT include separate InputLayers
+# x = tf.keras.applications.mobilenet_v2.preprocess_input(inputs)
+
+# base = tf.keras.applications.MobileNetV2(
+#     include_top=False, weights="imagenet", input_tensor=x)
+
+# x = layers.GlobalAveragePooling2D()(base.output)
+# x = layers.Dropout(0.3)(x)
+# outputs = layers.Dense(len(class_names), activation="softmax")(x)
+
+# model = tf.keras.Model(inputs, outputs)
+# model.compile(optimizer="adam",
+#               loss="sparse_categorical_crossentropy",
+#               metrics=["accuracy"])
+
+# model.summary()
+
+# model.fit(train_ds, validation_data=val_ds, epochs=20)
+
+# # this model WILL work with Grad-CAM
+# model.save("crop_disease_mobilenetv2_FIXED_FINAL.keras")
+# print("✔ Saved fixed model")
+# plt.figure()
+# plt.plot(history.history['accuracy'])
+# plt.plot(history.history['val_accuracy'])
+# plt.title("Model Accuracy")
+# plt.ylabel("Accuracy")
+# plt.xlabel("Epoch")
+# plt.legend(['Train', 'Validation'])
+# plt.show()
 
 
 

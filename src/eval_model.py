@@ -11,6 +11,7 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ✅ model is in src/models/
 model = tf.keras.models.load_model(
+    # os.path.join(ROOT_DIR, "src", "models", "crop_disease_mobilenetv2_FIXED_FINAL.keras")
     os.path.join(ROOT_DIR, "src", "models", "best_crop_disease_model.keras")
 )
 
@@ -47,6 +48,30 @@ y_pred = np.argmax(y_pred_probs, axis=1)
 print("\nClassification Report:\n")
 print(classification_report(y_true, y_pred, target_names=class_names))
 
+# -------------------------
+# Per-Crop Accuracy
+# -------------------------
+print("\nPer-Crop Accuracy:\n")
+
+crop_classes = {
+    "Tomato": [i for i, c in enumerate(class_names) if c.startswith("Tomato")],
+    "Potato": [i for i, c in enumerate(class_names) if c.startswith("Potato")],
+    "Corn":   [i for i, c in enumerate(class_names) if c.startswith("Corn")]
+}
+
+for crop, indices in crop_classes.items():
+    
+    mask = np.isin(y_true, indices)
+
+    crop_true = y_true[mask]
+    crop_pred = y_pred[mask]
+
+    correct = np.sum(crop_true == crop_pred)
+    total = len(crop_true)
+
+    acc = (correct / total) * 100
+
+    print(f"{crop} Accuracy: {correct}/{total} = {acc:.2f}%")
 # -------------------------
 # Confusion Matrix
 # -------------------------

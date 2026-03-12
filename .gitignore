@@ -39,3 +39,4 @@ desktop.ini
 
 # Logs
 *.log
+src/finetune_model.py

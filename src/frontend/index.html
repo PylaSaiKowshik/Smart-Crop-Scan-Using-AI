@@ -506,7 +506,13 @@ function runPredict() {
 
       // Format disease name nicely
       const niceName = data.prediction.replace(/___/g, " — ").replace(/_/g, " ");
-      document.getElementById("diseaseName").textContent = niceName;
+      const confidencePercent = (data.confidence * 100).toFixed(2);
+      document.getElementById("diseaseName").innerHTML = `
+        ${niceName}
+        <div style="font-size:0.9rem;color:#00e676;margin-top:4px;">
+          Confidence: ${confidencePercent}%
+        </div>
+      `;
       document.getElementById("resultEmoji").textContent = getResultEmoji(niceName);
 
       setTimeout(() => { show("msgResult"); scrollBottom(); }, 200);
